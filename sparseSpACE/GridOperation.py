@@ -159,12 +159,326 @@ class GridOperation(object):
         :param evaluation_points: Points at which we want to evaluate. List of points.
         :return:
         """
-        if not isinstance(self.grid, GlobalGrid):
-            self.grid.setCurrentArea(start=None, end=None, levelvec=component_grid.levelvector)
-        if mesh_points_grid is None:
-            mesh_points_grid = self.grid.coordinate_array_with_boundary
-        return Interpolation.interpolate_points(self.get_component_grid_values(component_grid, mesh_points_grid),
-                                                self.dim, self.grid, mesh_points_grid, evaluation_points)
+        if self.grid.boundary:
+            if not isinstance(self.grid, GlobalGrid):
+                self.grid.setCurrentArea(start=None, end=None, levelvec=component_grid.levelvector)
+            if mesh_points_grid is None:
+                mesh_points_grid = self.grid.coordinate_array_with_boundary
+            return Interpolation.interpolate_points(self.get_component_grid_values(component_grid, mesh_points_grid),
+                                                    self.dim, self.grid, mesh_points_grid, evaluation_points)
+        else:
+            grid_values = self.get_component_grid_values(component_grid, mesh_points_grid)
+            threshold = 200
+            if self.grid.get_num_points() < threshold and not self.dimension_wise:
+                self.grid.numPoints = 2 ** np.asarray(component_grid.levelvector)
+                if self.grid.boundary:
+                    self.grid.numPoints += 1
+                else:
+                    self.grid.numPoints -= 1
+                hats = np.array(get_cross_product_range_list(self.grid.numPoints)) + 1
+                hat_evaluations = self.hat_function_in_support_completely_vectorized(ivecs=hats, lvec=np.asarray(
+                    component_grid.levelvector), points=np.asarray(evaluation_points))
+                interpolated_values = np.sum(hat_evaluations * np.asarray(grid_values), axis=1)
+                interpolated_values = interpolated_values.reshape(
+                    ((len(evaluation_points), self.point_output_length())))
+            else:
+                if not isinstance(self.grid, GlobalGrid) and not isinstance(self.grid, GlobalTrapezoidalGrid):
+                    self.grid.setCurrentArea(start=None, end=None, levelvec=component_grid.levelvector)
+                if mesh_points_grid is None:
+                    mesh_points_grid = self.grid.coordinate_array_with_boundary
+                if self.grid.get_num_points() < threshold or self.grid.modified_basis:
+                    points, lower, upper = self.get_hat_domain_for_every_grid_point_vectorized(mesh_points_grid)
+                    hat_evaluations = self.hat_function_non_symmetric_completely_vectorized(points, lower, upper,
+                                                                                            evaluation_points)
+                    interpolated_values = np.sum(hat_evaluations * np.asarray(grid_values), axis=1)
+                    interpolated_values = interpolated_values.reshape(
+                        ((len(evaluation_points), self.point_output_length())))
+
+                else:
+                    interpolated_values = np.zeros((len(evaluation_points), self.point_output_length()))
+                    num_points = [len(mesh_points_grid[d]) - 2 * int(not (self.grid.boundary)) for d in range(self.dim)]
+                    offsets = np.array([int(np.prod(num_points[d + 1:])) for d in range(self.dim)])
+                    hat_support_cache = {}
+                    for i, p in enumerate(evaluation_points):
+                        hats, indices = self.get_neighbors_optimized(p, mesh_points_grid)
+                        supports = [hat_support_cache[hat] if hat in hat_support_cache else
+                                    self.get_grid_points_with_support(hat, mesh_points_grid, skip_equal_point=True)[0]
+                                    for hat in hats]
+                        for j, hat in enumerate(hats):
+                            hat_support_cache[hat] = supports[j]
+                        evaluations = self.hat_function_non_symmetric_vectorized(hats, supports, p)
+                        for hat, hat_position, j in zip(hats, indices, range(len(hats))):
+                            hat_index = np.inner(np.array(hat_position) - 1, offsets)
+                            interpolated_values[i] += grid_values[hat_index] * evaluations[j]
+
+            result2 = interpolated_values
+            return result2
+
+    def hat_function_non_symmetric_completely_vectorized(self, grid_point_positions: Sequence[Sequence[float]],
+                                                         lower: Sequence[Sequence[float]],
+                                                         upper: Sequence[Sequence[float]],
+                                                         evaluation_points: Sequence[Sequence[float]]) \
+            -> Sequence[float]:
+        """This method calculates the hat function value of the given coordinates with the given parameters
+
+        :param : d-dimensional center point of the hat function
+        :param : d-dimensional list of 2-dimensional tuples that describe the start and end values of the domain of the hat function
+        :param : d-dimensional coordinates whose function value are to be calculated
+        :return: value of the function at the coordinates given by x
+        """
+        # print(np.shape(lower), np.shape(upper), np.shape(grid_point_positions), np.shape(evaluation_points))
+        grid_point_positions = np.asarray(grid_point_positions)
+        evaluation_points = np.hstack([evaluation_points] * len(grid_point_positions)).reshape(
+            (len(evaluation_points), len(grid_point_positions), self.dim))
+        lower = np.asarray(lower)
+        upper = np.asarray(upper)
+        assert len(evaluation_points[0][0]) == len(grid_point_positions[0]) == len(lower[0]) == len(
+            upper[0])  # sanity check
+        result = np.ones(len(evaluation_points))
+        if not self.grid.modified_basis:
+            # if self.debug:
+            #    factor2 = np.ones(len(points))
+            #    for i, point in enumerate(points):
+            #        for dim in range(len(x)):
+            #            if x[dim] >= point[dim]:
+            #                # result is linear interpolation between middle and domain end
+            #                factor_part = max(0.0, 1.0 - (1.0 / (domain[i][dim][1] - point[dim])) * (x[dim] - point[dim]))
+            #            elif x[dim] < point[dim]:
+            #                factor_part = max(0.0, 1.0 - (1.0 / (point[dim] - domain[i][dim][0])) * (point[dim] - x[dim]))
+            #            factor2[i] *= factor_part
+
+            filter_upper = upper != grid_point_positions
+            value_1_temp = (evaluation_points[:, filter_upper] - grid_point_positions[filter_upper])
+            value1_temp = 1.0 - value_1_temp / (upper[filter_upper] - grid_point_positions[filter_upper])
+            value1_temp[value1_temp > 1] = 0
+            value1_temp[value1_temp < 0] = 0
+            value1 = np.zeros(np.shape(evaluation_points))
+            value1[:, filter_upper] = value1_temp  # if we are out of support we are <0 if we are on wrong side > 1
+
+            # value1_temp = 1.0 - (evaluation_points - grid_point_positions) / (upper - grid_point_positions)
+            # value1_maximum_filter = np.maximum.reduce([value1_temp, np.zeros(np.shape(evaluation_points))])
+            # value1_2 =  value1_maximum_filter * np.ceil(evaluation_points - grid_point_positions + 10**-30)
+            # print(value1, value1_2)
+            # assert np.all(value1 == value1_2)
+
+            filter_lower = lower != grid_point_positions
+            value_2_temp = (grid_point_positions[filter_lower] - evaluation_points[:, filter_lower])
+            value2_temp = 1.0 - value_2_temp / (grid_point_positions[filter_lower] - lower[filter_lower])
+            # if we are out of support we are <0 if we are on wrong side > 1
+            value2_temp[value2_temp >= 1] = 0
+            value2_temp[value2_temp < 0] = 0
+            value2 = np.zeros(np.shape(evaluation_points))
+            value2[:, filter_lower] = value2_temp
+            # value2_2 = np.maximum.reduce([1.0 - (grid_point_positions - evaluation_points) / (grid_point_positions - lower), np.zeros(np.shape(evaluation_points))]) * np.ceil(grid_point_positions - evaluation_points)
+            result = np.prod(value1 + value2, axis=2)
+            # print(value2, value2_2)
+            # assert np.all(value2_2 == value2)
+            return result
+        else:
+            # not yet implemented
+            # assert False
+            filter_upper = upper != None
+            filter_lower = lower != None
+
+            value_1_temp = (evaluation_points[:, filter_upper] - grid_point_positions[filter_upper])
+            value1_temp = 1.0 - value_1_temp / (upper[filter_upper] - grid_point_positions[filter_upper])
+            value1_temp[np.logical_and(value1_temp > 1, filter_lower)] = 0
+            value1_temp[value1_temp < 0] = 0
+            value1 = np.zeros(np.shape(evaluation_points))
+            value1[:, filter_upper] = value1_temp  # if we are out of support we are <0 if we are on wrong side > 1
+
+            # value1_temp = 1.0 - (evaluation_points - grid_point_positions) / (upper - grid_point_positions)
+            # value1_maximum_filter = np.maximum.reduce([value1_temp, np.zeros(np.shape(evaluation_points))])
+            # value1_2 =  value1_maximum_filter * np.ceil(evaluation_points - grid_point_positions + 10**-30)
+            # print(value1, value1_2)
+            # assert np.all(value1 == value1_2)
+
+            value_2_temp = (grid_point_positions[filter_lower] - evaluation_points[:, filter_lower])
+            value2_temp = 1.0 - value_2_temp / (grid_point_positions[filter_lower] - lower[filter_lower])
+            # if we are out of support we are <0 if we are on wrong side > 1
+            value2_temp[np.logical_and(value2_temp >= 1, filter_upper)] = 0
+            value2_temp[value2_temp < 0] = 0
+            value2 = np.zeros(np.shape(evaluation_points))
+            value2[:, filter_lower] = value2_temp
+            # value2_2 = np.maximum.reduce([1.0 - (grid_point_positions - evaluation_points) / (grid_point_positions - lower), np.zeros(np.shape(evaluation_points))]) * np.ceil(grid_point_positions - evaluation_points)
+            result = np.prod(value1 + value2, axis=2)
+            # print(value2, value2_2)
+            # assert np.all(value2_2 == value2)
+            return result
+
+    def get_hat_domain_for_every_grid_point_vectorized(self, gridPointCoordsAsStripes: Sequence[Sequence[float]]):
+        """This method returns the domain for the basis function centered on the given grid point as a numpy vector.
+
+        :param gridPointCoordsAsStripes: grid coordinates as 1D sequences
+        :return: d-dimenisional Sequence of 2-dimensional tuples containing the start and end of the function domain in each dimension
+        """
+        if self.grid.boundary:
+            coords = [np.array([0.0] + list(gridPointCoordsAsStripes[d]) + [1.0]) for d in range(self.dim)]
+        else:
+            coords = gridPointCoordsAsStripes
+        upper = get_cross_product_numpy_array(
+            [[1] if len(coords[d]) == 3 else np.roll(coords[d], -1)[1:-1] for d in range(self.dim)])
+        lower = get_cross_product_numpy_array(
+            [[0] if len(coords[d]) == 3 else np.roll(coords[d], 1)[1:-1] for d in range(self.dim)])
+        points = get_cross_product_numpy_array([coords[d][1:-1] for d in range(self.dim)])
+        return points, lower, upper
+
+    def hat_function_non_symmetric_vectorized(self, points: Sequence[float],
+                                              domain: Sequence[float],
+                                              x: Sequence[float]) \
+            -> float:
+        """This method calculates the hat function value of the given coordinates with the given parameters
+
+        :param : d-dimensional center point of the hat function
+        :param : d-dimensional list of 2-dimensional tuples that describe the start and end values of the domain of the hat function
+        :param : d-dimensional coordinates whose function value are to be calculated
+        :return: value of the function at the coordinates given by x
+        """
+        points = np.asarray(points)
+        x = np.asarray(x)
+        domain = np.asarray(domain)
+        assert len(points[0]) == len(x) == len(domain[0])  # sanity check
+        result = np.ones(len(points))
+        if not self.grid.modified_basis:
+            if self.debug:
+                factor2 = np.ones(len(points))
+                for i, point in enumerate(points):
+                    for dim in range(len(x)):
+                        if x[dim] >= point[dim]:
+                            # result is linear interpolation between middle and domain end
+                            factor_part = max(0.0,
+                                              1.0 - (1.0 / (domain[i][dim][1] - point[dim])) * (x[dim] - point[dim]))
+                        elif x[dim] < point[dim]:
+                            factor_part = max(0.0,
+                                              1.0 - (1.0 / (point[dim] - domain[i][dim][0])) * (point[dim] - x[dim]))
+                        factor2[i] *= factor_part
+            domain = domain.T
+            value1 = (1.0 - (x - points) / (domain[1].T - points)) * np.ceil(x - points + 10 ** -30)
+            value2 = (1.0 - (points - x) / (points - domain[0].T)) * np.ceil(points - x)
+            factor = np.prod(value1 + value2, axis=1)
+            if self.debug:
+                assert np.all(factor == factor2)
+            result *= factor
+            return result
+        else:
+            # not yet implemented
+            assert False
+            for dim in range(len(x)):
+                # if the domain reaches the boundary, we extrapolate with the same slope that's to the neighboring point
+                boundary_check = lambda x: x == 0.0 or x == 1.0
+                if x[dim] >= point[dim]:
+                    # result is linear interpolation between middle and domain end
+                    if boundary_check(domain[dim][1]):
+                        result *= (1.0 / (domain[dim][1] - point[dim])) * (x[dim] - point[dim])
+                    else:
+                        result *= max(0.0, 1.0 - (1.0 / (domain[dim][1] - point[dim])) * (x[dim] - point[dim]))
+                elif x[dim] < point[dim]:
+                    if boundary_check(domain[dim][0]):
+                        result *= (1.0 / (point[dim] - domain[dim][0])) * (point[dim] - x[dim])
+                    else:
+                        result *= max(0.0, 1.0 - (1.0 / (point[dim] - domain[dim][0])) * (point[dim] - x[dim]))
+            return result
+
+    def hat_function_in_support_completely_vectorized(self, ivecs: Sequence[Sequence[int]],
+                                                      lvec: Sequence[int],
+                                                      points: Sequence[float]) \
+            -> float:
+        """
+        This method calculates the value of the hat function at the point x
+
+        :param ivecs: Vector with indeces of the hat functions
+        :param lvec: Levelvector of the component grid
+        :param points: datapoints
+        :return: Value of the hat function at points, for different ivecs (numpy array shape(nPoints,nIvecs))
+        """
+        dim = len(lvec)
+        results = np.empty(len(ivecs))
+        points = np.hstack([points] * len(ivecs)).reshape((len(points), len(ivecs), self.dim))
+        inner_calculation = 1 - abs(2 ** lvec * points - ivecs)
+        max_filter = np.maximum.reduce([inner_calculation, np.zeros(np.shape(points))])
+        result = np.prod(max_filter, axis=2)
+        assert np.all(result >= 0)
+        assert (len(result[0]) == len(ivecs))
+        assert (len(result) == len(points))
+        return result
+
+    def get_neighbors_optimized(self, point: Sequence[float], gridPointCoordsAsStripes: Sequence[Sequence[float]]) -> \
+            Tuple[Sequence[Tuple[float, ...]], Sequence[Tuple[int, ...]]]:
+        """This method returns the domain for the basis function centered on the given grid point. Vectorized with numpy
+
+        :param point: d-dimensional Sequence containing the coordinates of the grid point
+        :gridPointCoordsAsStripes: grid coordinates as 1D sequences
+        :return: d-dimenisional Sequence of 2-dimensional tuples containing the nrighbouring points in support + an array with their indices
+        """
+        # create a tuple for each point whose elements are the coordinates that are within the domain
+        point_domain, indices_point = self.get_grid_points_with_support(point, gridPointCoordsAsStripes,
+                                                                        return_boundary=self.grid.boundary)
+        # d-dimensional coordinates of neighbours in support
+        neighbors = get_cross_product_list(point_domain)
+        # d-dim indices of neighbours in support
+        indices = get_cross_product_list(indices_point)
+        # sanity check
+        assert len(neighbors) == len(indices)
+        return neighbors, indices
+
+    def get_grid_points_with_support(self, point: Sequence[float], gridPointCoordsAsStripes: Sequence[Sequence[float]],
+                                     skip_equal_point: bool = False, return_boundary: bool = True):
+        """
+
+        :param point: d-dimensional tuple containing the indices of the point
+        :param gridPointCoordsAsStripes: grid coordinates as 1D sequences
+        :param skip_equal_point:
+        :param return_boundary:
+        :return:
+        """
+        hats = []
+        indices = []
+        for d in range(self.dim):
+            if len(gridPointCoordsAsStripes[d]) == 3 and not return_boundary:
+                hats_d = [gridPointCoordsAsStripes[d][1]]
+                indices_d = [1]
+            else:
+                hats_d, indices_d = self.take_closest(gridPointCoordsAsStripes[d], point[d], skip_equal_point)
+                if not return_boundary:
+                    indices_d = [i for (i, h) in zip(indices_d, hats_d) if h != 0 and h != 1]
+                    hats_d = [h for h in hats_d if h != 0 and h != 1]
+            hats.append(hats_d)
+            indices.append(indices_d)
+            assert (len(hats) == len(indices))
+        return hats, indices
+
+    def take_closest(self, grid_points: Sequence[float], point: float, skip_equal_point: bool = False) \
+            -> Tuple[Tuple[float, float], Tuple[int, int]]:
+        """Assumes gridPoints is sorted. Returns closest two values + indices to point.
+
+        :param grid_points:
+        :param point:
+        :param skip_equal_point:
+        :return: Two values closest to the given point and their indices
+        """
+        pos = bisect_left(grid_points, point)
+        if pos == 0:
+            pos = 1
+        if pos == len(grid_points):
+            # should not happen as point needs to be within the domain
+            assert False
+        before = grid_points[pos - 1]
+        after = grid_points[pos]
+        position_before = pos - 1
+        position_after = pos
+        if skip_equal_point and before == point and position_before != 0:
+            points = [grid_points[pos - 2]]
+            indices = [pos - 2]
+        else:
+            points = [before]
+            indices = [position_before]
+        if skip_equal_point and after == point and position_after != len(grid_points) - 1:
+            points.append(grid_points[pos + 1])
+            indices.append(pos + 1)
+        else:
+            points.append(after)
+            indices.append(position_after)
+        return points, indices
 
     @abc.abstractmethod
     def eval_analytic(self, coordinate: Tuple[float, ...]) -> Sequence[float]:
@@ -360,65 +674,6 @@ class MachineLearning(AreaOperation):
                 self.scaled = True
         self.initialized = True
 
-    def interpolate_points_component_grid(self, component_grid: ComponentGridInfo,
-                                          mesh_points_grid: Sequence[Sequence[float]],
-                                          evaluation_points: Sequence[Tuple[float, ...]]):
-        """Interpolate the given evaluation points on the given component grid
-
-        :param component_grid: Class object containing the level vector and coefficient of the component grid
-        :param mesh_points_grid: Sequence containing the d-dimensional grid points
-        :param evaluation_points: The d-dimensional points to be evaluated
-        """
-        if self.grid.boundary:
-            result1 = super().interpolate_points_component_grid(component_grid, mesh_points_grid, evaluation_points)
-            return result1
-        else:
-            surplus_values = self.surpluses[tuple(component_grid.levelvector)]
-            threshold = 200
-            if self.grid.get_num_points() < threshold and not self.dimension_wise:
-                self.grid.numPoints = 2 ** np.asarray(component_grid.levelvector)
-                if self.grid.boundary:
-                    self.grid.numPoints += 1
-                else:
-                    self.grid.numPoints -= 1
-                hats = np.array(get_cross_product_range_list(self.grid.numPoints)) + 1
-                hat_evaluations = self.hat_function_in_support_completely_vectorized(ivecs=hats, lvec=np.asarray(
-                    component_grid.levelvector), points=np.asarray(evaluation_points))
-                interpolated_values = np.sum(hat_evaluations * np.asarray(surplus_values), axis=1)
-                interpolated_values = interpolated_values.reshape(
-                    ((len(evaluation_points), self.point_output_length())))
-            else:
-                if not isinstance(self.grid, GlobalGrid) and not isinstance(self.grid, GlobalTrapezoidalGrid):
-                    self.grid.setCurrentArea(start=None, end=None, levelvec=component_grid.levelvector)
-                if mesh_points_grid is None:
-                    mesh_points_grid = self.grid.coordinate_array_with_boundary
-                if self.grid.get_num_points() < threshold:
-                    points, lower, upper = self.get_hat_domain_for_every_grid_point_vectorized(mesh_points_grid)
-                    hat_evaluations = self.hat_function_non_symmetric_completely_vectorized(points, lower, upper,
-                                                                                            evaluation_points)
-                    interpolated_values = np.sum(hat_evaluations * np.asarray(surplus_values), axis=1)
-                    interpolated_values = interpolated_values.reshape(
-                        ((len(evaluation_points), self.point_output_length())))
-
-                else:
-                    interpolated_values = np.zeros((len(evaluation_points), self.point_output_length()))
-                    num_points = [len(mesh_points_grid[d]) - 2 * int(not (self.grid.boundary)) for d in range(self.dim)]
-                    offsets = np.array([int(np.prod(num_points[d + 1:])) for d in range(self.dim)])
-                    hat_support_cache = {}
-                    for i, p in enumerate(evaluation_points):
-                        hats, indices = self.get_neighbors_optimized(p, mesh_points_grid)
-                        supports = [hat_support_cache[hat] if hat in hat_support_cache else
-                                    self.get_grid_points_with_support(hat, mesh_points_grid, skip_equal_point=True)[0]
-                                    for hat in hats]
-                        for j, hat in enumerate(hats):
-                            hat_support_cache[hat] = supports[j]
-                        evaluations = self.hat_function_non_symmetric_vectorized(hats, supports, p)
-                        for hat, hat_position, j in zip(hats, indices, range(len(hats))):
-                            hat_index = np.inner(np.array(hat_position) - 1, offsets)
-                            interpolated_values[i] += surplus_values[hat_index] * evaluations[j]
-
-            result2 = interpolated_values
-            return result2
 
     def post_processing(self):
         """This method is used to compute the minimum and maximum surplus of the component grid
@@ -469,264 +724,11 @@ class MachineLearning(AreaOperation):
             values = np.asarray(surpluses)
         return values.reshape((len(values), 1))
 
-    def get_neighbors_optimized(self, point: Sequence[float], gridPointCoordsAsStripes: Sequence[Sequence[float]]) -> \
-            Tuple[Sequence[Tuple[float, ...]], Sequence[Tuple[int, ...]]]:
-        """This method returns the domain for the basis function centered on the given grid point. Vectorized with numpy
-
-        :param point: d-dimensional Sequence containing the coordinates of the grid point
-        :gridPointCoordsAsStripes: grid coordinates as 1D sequences
-        :return: d-dimenisional Sequence of 2-dimensional tuples containing the nrighbouring points in support + an array with their indices
-        """
-        # create a tuple for each point whose elements are the coordinates that are within the domain
-        point_domain, indices_point = self.get_grid_points_with_support(point, gridPointCoordsAsStripes,
-                                                                        return_boundary=self.grid.boundary)
-        # d-dimensional coordinates of neighbours in support
-        neighbors = get_cross_product_list(point_domain)
-        # d-dim indices of neighbours in support
-        indices = get_cross_product_list(indices_point)
-        # sanity check
-        assert len(neighbors) == len(indices)
-        return neighbors, indices
-
-    def get_hat_domain_for_every_grid_point_vectorized(self, gridPointCoordsAsStripes: Sequence[Sequence[float]]):
-        """This method returns the domain for the basis function centered on the given grid point as a numpy vector.
-
-        :param gridPointCoordsAsStripes: grid coordinates as 1D sequences
-        :return: d-dimenisional Sequence of 2-dimensional tuples containing the start and end of the function domain in each dimension
-        """
-        if self.grid.boundary:
-            coords = [np.array([0.0] + list(gridPointCoordsAsStripes[d]) + [1.0]) for d in range(self.dim)]
-        else:
-            coords = gridPointCoordsAsStripes
-        upper = get_cross_product_numpy_array(
-            [[1] if len(coords[d]) == 3 else np.roll(coords[d], -1)[1:-1] for d in range(self.dim)])
-        lower = get_cross_product_numpy_array(
-            [[0] if len(coords[d]) == 3 else np.roll(coords[d], 1)[1:-1] for d in range(self.dim)])
-        points = get_cross_product_numpy_array([coords[d][1:-1] for d in range(self.dim)])
-        return points, lower, upper
-
-    def get_grid_points_with_support(self, point: Sequence[float], gridPointCoordsAsStripes: Sequence[Sequence[float]],
-                                     skip_equal_point: bool = False, return_boundary: bool = True):
-        """
-
-        :param point: d-dimensional tuple containing the indices of the point
-        :param gridPointCoordsAsStripes: grid coordinates as 1D sequences
-        :param skip_equal_point:
-        :param return_boundary:
-        :return:
-        """
-        hats = []
-        indices = []
-        for d in range(self.dim):
-            if len(gridPointCoordsAsStripes[d]) == 3 and not return_boundary:
-                hats_d = [gridPointCoordsAsStripes[d][1]]
-                indices_d = [1]
-            else:
-                hats_d, indices_d = self.take_closest(gridPointCoordsAsStripes[d], point[d], skip_equal_point)
-                if not return_boundary:
-                    indices_d = [i for (i, h) in zip(indices_d, hats_d) if h != 0 and h != 1]
-                    hats_d = [h for h in hats_d if h != 0 and h != 1]
-            hats.append(hats_d)
-            indices.append(indices_d)
-            assert (len(hats) == len(indices))
-        return hats, indices
-
-    def take_closest(self, grid_points: Sequence[float], point: float, skip_equal_point: bool = False) \
-            -> Tuple[Tuple[float, float], Tuple[int, int]]:
-        """Assumes gridPoints is sorted. Returns closest two values + indices to point.
-
-        :param grid_points:
-        :param point:
-        :param skip_equal_point:
-        :return: Two values closest to the given point and their indices
-        """
-        pos = bisect_left(grid_points, point)
-        if pos == 0:
-            pos = 1
-        if pos == len(grid_points):
-            # should not happen as point needs to be within the domain
-            assert False
-        before = grid_points[pos - 1]
-        after = grid_points[pos]
-        position_before = pos - 1
-        position_after = pos
-        if skip_equal_point and before == point and position_before != 0:
-            points = [grid_points[pos - 2]]
-            indices = [pos - 2]
-        else:
-            points = [before]
-            indices = [position_before]
-        if skip_equal_point and after == point and position_after != len(grid_points) - 1:
-            points.append(grid_points[pos + 1])
-            indices.append(pos + 1)
-        else:
-            points.append(after)
-            indices.append(position_after)
-        return points, indices
-
-    def hat_function_non_symmetric_vectorized(self, points: Sequence[float],
-                                              domain: Sequence[float],
-                                              x: Sequence[float]) \
-            -> float:
-        """This method calculates the hat function value of the given coordinates with the given parameters
-
-        :param : d-dimensional center point of the hat function
-        :param : d-dimensional list of 2-dimensional tuples that describe the start and end values of the domain of the hat function
-        :param : d-dimensional coordinates whose function value are to be calculated
-        :return: value of the function at the coordinates given by x
-        """
-        points = np.asarray(points)
-        x = np.asarray(x)
-        domain = np.asarray(domain)
-        assert len(points[0]) == len(x) == len(domain[0])  # sanity check
-        result = np.ones(len(points))
-        if not self.grid.modified_basis:
-            if self.debug:
-                factor2 = np.ones(len(points))
-                for i, point in enumerate(points):
-                    for dim in range(len(x)):
-                        if x[dim] >= point[dim]:
-                            # result is linear interpolation between middle and domain end
-                            factor_part = max(0.0,
-                                              1.0 - (1.0 / (domain[i][dim][1] - point[dim])) * (x[dim] - point[dim]))
-                        elif x[dim] < point[dim]:
-                            factor_part = max(0.0,
-                                              1.0 - (1.0 / (point[dim] - domain[i][dim][0])) * (point[dim] - x[dim]))
-                        factor2[i] *= factor_part
-            domain = domain.T
-            value1 = (1.0 - (x - points) / (domain[1].T - points)) * np.ceil(x - points + 10 ** -30)
-            value2 = (1.0 - (points - x) / (points - domain[0].T)) * np.ceil(points - x)
-            factor = np.prod(value1 + value2, axis=1)
-            if self.debug:
-                assert np.all(factor == factor2)
-            result *= factor
-            return result
-        else:
-            # not yet implemented
-            assert False
-            for dim in range(len(x)):
-                # if the domain reaches the boundary, we extrapolate with the same slope that's to the neighboring point
-                boundary_check = lambda x: x == 0.0 or x == 1.0
-                if x[dim] >= point[dim]:
-                    # result is linear interpolation between middle and domain end
-                    if boundary_check(domain[dim][1]):
-                        result *= (1.0 / (domain[dim][1] - point[dim])) * (x[dim] - point[dim])
-                    else:
-                        result *= max(0.0, 1.0 - (1.0 / (domain[dim][1] - point[dim])) * (x[dim] - point[dim]))
-                elif x[dim] < point[dim]:
-                    if boundary_check(domain[dim][0]):
-                        result *= (1.0 / (point[dim] - domain[dim][0])) * (point[dim] - x[dim])
-                    else:
-                        result *= max(0.0, 1.0 - (1.0 / (point[dim] - domain[dim][0])) * (point[dim] - x[dim]))
-            return result
-
-    def hat_function_non_symmetric_completely_vectorized(self, grid_point_positions: Sequence[Sequence[float]],
-                                                         lower: Sequence[Sequence[float]],
-                                                         upper: Sequence[Sequence[float]],
-                                                         evaluation_points: Sequence[Sequence[float]]) \
-            -> Sequence[float]:
-        """This method calculates the hat function value of the given coordinates with the given parameters
-
-        :param : d-dimensional center point of the hat function
-        :param : d-dimensional list of 2-dimensional tuples that describe the start and end values of the domain of the hat function
-        :param : d-dimensional coordinates whose function value are to be calculated
-        :return: value of the function at the coordinates given by x
-        """
-        # print(np.shape(lower), np.shape(upper), np.shape(grid_point_positions), np.shape(evaluation_points))
-        grid_point_positions = np.asarray(grid_point_positions)
-        evaluation_points = np.hstack([evaluation_points] * len(grid_point_positions)).reshape(
-            (len(evaluation_points), len(grid_point_positions), self.dim))
-        lower = np.asarray(lower)
-        upper = np.asarray(upper)
-        assert len(evaluation_points[0][0]) == len(grid_point_positions[0]) == len(lower[0]) == len(
-            upper[0])  # sanity check
-        result = np.ones(len(evaluation_points))
-        if not self.grid.modified_basis:
-            # if self.debug:
-            #    factor2 = np.ones(len(points))
-            #    for i, point in enumerate(points):
-            #        for dim in range(len(x)):
-            #            if x[dim] >= point[dim]:
-            #                # result is linear interpolation between middle and domain end
-            #                factor_part = max(0.0, 1.0 - (1.0 / (domain[i][dim][1] - point[dim])) * (x[dim] - point[dim]))
-            #            elif x[dim] < point[dim]:
-            #                factor_part = max(0.0, 1.0 - (1.0 / (point[dim] - domain[i][dim][0])) * (point[dim] - x[dim]))
-            #            factor2[i] *= factor_part
-
-            filter_upper = upper != grid_point_positions
-            value_1_temp = (evaluation_points[:, filter_upper] - grid_point_positions[filter_upper])
-            value1_temp = 1.0 - value_1_temp / (upper[filter_upper] - grid_point_positions[filter_upper])
-            value1_temp[value1_temp > 1] = 0
-            value1_temp[value1_temp < 0] = 0
-            value1 = np.zeros(np.shape(evaluation_points))
-            value1[:, filter_upper] = value1_temp  # if we are out of support we are <0 if we are on wrong side > 1
-
-            # value1_temp = 1.0 - (evaluation_points - grid_point_positions) / (upper - grid_point_positions)
-            # value1_maximum_filter = np.maximum.reduce([value1_temp, np.zeros(np.shape(evaluation_points))])
-            # value1_2 =  value1_maximum_filter * np.ceil(evaluation_points - grid_point_positions + 10**-30)
-            # print(value1, value1_2)
-            # assert np.all(value1 == value1_2)
-
-            filter_lower = lower != grid_point_positions
-            value_2_temp = (grid_point_positions[filter_lower] - evaluation_points[:, filter_lower])
-            value2_temp = 1.0 - value_2_temp / (grid_point_positions[filter_lower] - lower[filter_lower])
-            # if we are out of support we are <0 if we are on wrong side > 1
-            value2_temp[value2_temp >= 1] = 0
-            value2_temp[value2_temp < 0] = 0
-            value2 = np.zeros(np.shape(evaluation_points))
-            value2[:, filter_lower] = value2_temp
-            # value2_2 = np.maximum.reduce([1.0 - (grid_point_positions - evaluation_points) / (grid_point_positions - lower), np.zeros(np.shape(evaluation_points))]) * np.ceil(grid_point_positions - evaluation_points)
-            result = np.prod(value1 + value2, axis=2)
-            # print(value2, value2_2)
-            # assert np.all(value2_2 == value2)
-            return result
-        else:
-            # not yet implemented
-            assert False
-            for dim in range(len(x)):
-                # if the domain reaches the boundary, we extrapolate with the same slope that's to the neighboring point
-                boundary_check = lambda x: x == 0.0 or x == 1.0
-                if x[dim] >= point[dim]:
-                    # result is linear interpolation between middle and domain end
-                    if boundary_check(domain[dim][1]):
-                        result *= (1.0 / (domain[dim][1] - point[dim])) * (x[dim] - point[dim])
-                    else:
-                        result *= max(0.0, 1.0 - (1.0 / (domain[dim][1] - point[dim])) * (x[dim] - point[dim]))
-                elif x[dim] < point[dim]:
-                    if boundary_check(domain[dim][0]):
-                        result *= (1.0 / (point[dim] - domain[dim][0])) * (point[dim] - x[dim])
-                    else:
-                        result *= max(0.0, 1.0 - (1.0 / (point[dim] - domain[dim][0])) * (point[dim] - x[dim]))
-            return result
-
     def get_distinct_points(self, combi_scheme):
         # Here we return all points that are used in the current combination scheme
         # Redundant points are intentionally not removed here as they cannot share point values between grids!
         s = sum([len(self.surpluses[tuple(component_grid.levelvector)]) for component_grid in combi_scheme])
         return s
-
-    def hat_function_in_support_completely_vectorized(self, ivecs: Sequence[Sequence[int]],
-                                                      lvec: Sequence[int],
-                                                      points: Sequence[float]) \
-            -> float:
-        """
-        This method calculates the value of the hat function at the point x
-
-        :param ivecs: Vector with indeces of the hat functions
-        :param lvec: Levelvector of the component grid
-        :param points: datapoints
-        :return: Value of the hat function at points, for different ivecs (numpy array shape(nPoints,nIvecs))
-        """
-        dim = len(lvec)
-        results = np.empty(len(ivecs))
-        points = np.hstack([points] * len(ivecs)).reshape((len(points), len(ivecs), self.dim))
-        inner_calculation = 1 - abs(2 ** lvec * points - ivecs)
-        max_filter = np.maximum.reduce([inner_calculation, np.zeros(np.shape(points))])
-        result = np.prod(max_filter, axis=2)
-        assert np.all(result >= 0)
-        assert (len(result[0]) == len(ivecs))
-        assert (len(result) == len(points))
-        return result
 
     def get_point_values_component_grid_multiple(self, pointsets: Sequence[Sequence[Sequence[float]]],
                                                  component_grid: ComponentGridInfo) \
