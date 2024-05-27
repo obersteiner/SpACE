@@ -480,6 +480,17 @@ class GridOperation(object):
             indices.append(position_after)
         return points, indices
 
+    def init_dimension_wise(self, grid, grid_surplusses, refinement_container, lmin, lmax, a, b, version=2):
+        self.grid = grid
+        self.grid_surplusses = grid_surplusses
+        self.refinement_container = refinement_container
+        self.version = version
+        self.lmin = lmin
+        self.lmax = lmax
+        self.a = a
+        self.b = b
+        self.dimension_wise = True
+
     @abc.abstractmethod
     def eval_analytic(self, coordinate: Tuple[float, ...]) -> Sequence[float]:
         """This method evaluates the analytic model at the given coordinate.
@@ -624,17 +635,6 @@ class MachineLearning(AreaOperation):
         # X_std = (X - maximum) / (maximum - minimum)
 
         # transform(self.data)
-
-    def init_dimension_wise(self, grid, grid_surplusses, refinement_container, lmin, lmax, a, b, version=2):
-        self.grid = grid
-        self.grid_surplusses = grid_surplusses
-        self.refinement_container = refinement_container
-        self.version = version
-        self.lmin = lmin
-        self.lmax = lmax
-        self.a = a
-        self.b = b
-        self.dimension_wise = True
 
     def initialize(self):
         """This method is used to initialize the operation with the dataset.
@@ -3298,16 +3298,6 @@ class Integration(AreaOperation):
 
     def set_function(self, f=None):
         assert f is None or f == self.f, "Integration and the refinement should use the same function"
-
-    def init_dimension_wise(self, grid, grid_surplusses, refinement_container, lmin, lmax, a, b, version=2):
-        self.grid = grid
-        self.grid_surplusses = grid_surplusses
-        self.refinement_container = refinement_container
-        self.version = version
-        self.lmin = lmin
-        self.lmax = lmax
-        self.a = a
-        self.b = b
 
     def initialize_evaluation_dimension_wise(self, refinement_container):
         refinement_container.value = np.zeros(self.f.output_length())
