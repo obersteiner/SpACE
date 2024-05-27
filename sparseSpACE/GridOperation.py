@@ -167,7 +167,11 @@ class GridOperation(object):
             return Interpolation.interpolate_points(self.get_component_grid_values(component_grid, mesh_points_grid),
                                                     self.dim, self.grid, mesh_points_grid, evaluation_points)
         else:
-            grid_values = self.get_component_grid_values(component_grid, mesh_points_grid)
+            # mesh_point_grids is expected to contain the boundaries
+            # gettung the grid values without the boundaries
+            #print("Coordinates", mesh_points_grid)
+            mesh_points_grid_without_boundary = [m[1:-1] for m in mesh_points_grid]
+            grid_values = self.get_component_grid_values(component_grid, mesh_points_grid_without_boundary)
             threshold = 200
             if self.grid.get_num_points() < threshold and not self.dimension_wise:
                 self.grid.numPoints = 2 ** np.asarray(component_grid.levelvector)
@@ -189,8 +193,8 @@ class GridOperation(object):
                 if self.grid.get_num_points() < threshold or self.grid.modified_basis:
                     points, lower, upper = self.get_hat_domain_for_every_grid_point_vectorized(mesh_points_grid)
                     hat_evaluations = self.hat_function_non_symmetric_completely_vectorized(points, lower, upper,
-                                                                                            evaluation_points)
-                    interpolated_values = np.sum(hat_evaluations * np.asarray(grid_values), axis=1)
+                                                                                            evaluation_points, grid_values)
+                    interpolated_values = np.sum(hat_evaluations * np.asarray(grid_values).flatten(), axis=1)
                     interpolated_values = interpolated_values.reshape(
                         ((len(evaluation_points), self.point_output_length())))
 
@@ -217,7 +221,8 @@ class GridOperation(object):
     def hat_function_non_symmetric_completely_vectorized(self, grid_point_positions: Sequence[Sequence[float]],
                                                          lower: Sequence[Sequence[float]],
                                                          upper: Sequence[Sequence[float]],
-                                                         evaluation_points: Sequence[Sequence[float]]) \
+                                                         evaluation_points: Sequence[Sequence[float]],
+                                                         grid_values: Sequence[float]) \
             -> Sequence[float]:
         """This method calculates the hat function value of the given coordinates with the given parameters
 
@@ -235,6 +240,7 @@ class GridOperation(object):
         assert len(evaluation_points[0][0]) == len(grid_point_positions[0]) == len(lower[0]) == len(
             upper[0])  # sanity check
         result = np.ones(len(evaluation_points))
+        #print("Eval points", evaluation_points)
         if not self.grid.modified_basis:
             # if self.debug:
             #    factor2 = np.ones(len(points))
@@ -282,7 +288,7 @@ class GridOperation(object):
 
             value_1_temp = (evaluation_points[:, filter_upper] - grid_point_positions[filter_upper])
             value1_temp = 1.0 - value_1_temp / (upper[filter_upper] - grid_point_positions[filter_upper])
-            value1_temp[np.logical_and(value1_temp > 1, filter_lower)] = 0
+            value1_temp[np.logical_and(value1_temp > 1, filter_lower[filter_upper])] = 0
             value1_temp[value1_temp < 0] = 0
             value1 = np.zeros(np.shape(evaluation_points))
             value1[:, filter_upper] = value1_temp  # if we are out of support we are <0 if we are on wrong side > 1
@@ -296,12 +302,17 @@ class GridOperation(object):
             value_2_temp = (grid_point_positions[filter_lower] - evaluation_points[:, filter_lower])
             value2_temp = 1.0 - value_2_temp / (grid_point_positions[filter_lower] - lower[filter_lower])
             # if we are out of support we are <0 if we are on wrong side > 1
-            value2_temp[np.logical_and(value2_temp >= 1, filter_upper)] = 0
+            value2_temp[np.logical_and(value2_temp >= 1, filter_upper[filter_lower])] = 0
             value2_temp[value2_temp < 0] = 0
             value2 = np.zeros(np.shape(evaluation_points))
             value2[:, filter_lower] = value2_temp
+
+            value3 = np.zeros(np.shape(evaluation_points))
+            value3[:, np.logical_and(upper == None, lower == None)] = 1
+            #print("values 1- 3", value1, value2, value3)
             # value2_2 = np.maximum.reduce([1.0 - (grid_point_positions - evaluation_points) / (grid_point_positions - lower), np.zeros(np.shape(evaluation_points))]) * np.ceil(grid_point_positions - evaluation_points)
-            result = np.prod(value1 + value2, axis=2)
+            result = np.prod(value1 + value2 + value3, axis=2)
+            #print("Result", result)
             # print(value2, value2_2)
             # assert np.all(value2_2 == value2)
             return result
@@ -312,15 +323,21 @@ class GridOperation(object):
         :param gridPointCoordsAsStripes: grid coordinates as 1D sequences
         :return: d-dimenisional Sequence of 2-dimensional tuples containing the start and end of the function domain in each dimension
         """
+        gridPointCoordsAsStripes = np.array(gridPointCoordsAsStripes, copy=True, dtype=object)
         if self.grid.boundary:
             coords = [np.array([0.0] + list(gridPointCoordsAsStripes[d]) + [1.0]) for d in range(self.dim)]
         else:
+            if self.grid.modified_basis:
+                for d in range(self.dim):
+                    gridPointCoordsAsStripes[d][0] = None
+                    gridPointCoordsAsStripes[d][-1] = None
             coords = gridPointCoordsAsStripes
         upper = get_cross_product_numpy_array(
-            [[1] if len(coords[d]) == 3 else np.roll(coords[d], -1)[1:-1] for d in range(self.dim)])
+            [np.roll(coords[d], -1)[1:-1] for d in range(self.dim)])
         lower = get_cross_product_numpy_array(
-            [[0] if len(coords[d]) == 3 else np.roll(coords[d], 1)[1:-1] for d in range(self.dim)])
+            [np.roll(coords[d], 1)[1:-1] for d in range(self.dim)])
         points = get_cross_product_numpy_array([coords[d][1:-1] for d in range(self.dim)])
+        #print(gridPointCoordsAsStripes, points, lower, upper)
         return points, lower, upper
 
     def hat_function_non_symmetric_vectorized(self, points: Sequence[float],
