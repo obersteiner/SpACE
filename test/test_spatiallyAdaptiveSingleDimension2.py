@@ -31,7 +31,7 @@ class TestSpatiallyAdaptiveSingleDimension2(unittest.TestCase):
         a = -3
         b = 6
         for d in range(2, 4):
-            grid = GlobalLagrangeGrid(a * np.ones(d), b * np.ones(d), boundary=True, modified_basis=False, p=2)
+            grid = GlobalHierarchicalLagrangeGrid(a * np.ones(d), b * np.ones(d), boundary=True, modified_basis=False, p=2)
             f = FunctionPolynomial([10 * (i + 1) for i in range(d)], degree=2)
             operation = Integration(f, grid=grid, dim=d, reference_solution=f.getAnalyticSolutionIntegral(a * np.ones(d), b * np.ones(d)))
             errorOperator = ErrorCalculatorSingleDimVolumeGuided()
@@ -104,7 +104,7 @@ class TestSpatiallyAdaptiveSingleDimension2(unittest.TestCase):
         a = -1
         b = 6
         for d in range(2, 5):
-            grid = GlobalLagrangeGrid(a * np.ones(d), b * np.ones(d), boundary=True, modified_basis=False, p=2)
+            grid = GlobalHierarchicalLagrangeGrid(a * np.ones(d), b * np.ones(d), boundary=True, modified_basis=False, p=2)
             f = FunctionPolynomial([(i + 1) for i in range(d)], degree=2)
             operation = Integration(f, grid=grid, dim=d, reference_solution=f.getAnalyticSolutionIntegral(a * np.ones(d), b * np.ones(d)))
             errorOperator = ErrorCalculatorSingleDimVolumeGuided()

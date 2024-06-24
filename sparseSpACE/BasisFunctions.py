@@ -94,12 +94,15 @@ class BSpline(BasisFunction):
         return result
 
 
+# Data structure for one lagrange basis
 class LagrangeBasis(BasisFunction):
     def __init__(self, p: int, index: int, knots: np.array):
         self.p = p
         self.knots = knots
         #assert p == len(knots) - 1
         self.index = index
+
+        # Construct factor of lagrange polynomial for this basis point
         self.factor = 1
         for i, knot in enumerate(self.knots):
             assert not isinf(self.knots[i])
@@ -109,10 +112,15 @@ class LagrangeBasis(BasisFunction):
 
     def __call__(self, x: float) -> float:
         result = 1
+
+        # Evaluate basis function at point x
         for i, knot in enumerate(self.knots):
             if self.index != i:
                 result *= (x - self.knots[i])
-        return result * self.factor
+
+        # Complete construction of lagrange polynomial for this basis point evaluated at x
+        evaluated_basis = result * self.factor
+        return evaluated_basis
 
     def get_first_derivative(self, x: float) -> float:
         return self.derivative_for_index(x, [self.index])

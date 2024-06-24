@@ -10,7 +10,8 @@ from sparseSpACE.Utils import *
 from sparseSpACE.ComponentGridInfo import *
 from typing import Callable, Tuple, Sequence
 from sparseSpACE.Extrapolation import ExtrapolationGrid, SliceGrouping, SliceVersion, SliceContainerVersion, \
-    BalancedExtrapolationGrid
+    BalancedExtrapolationGrid, GridVersion
+
 
 # the grid class provides basic functionalities for an abstract grid
 class Grid(object):
@@ -348,7 +349,7 @@ class BasisGrid(Grid):
 
 
 class LagrangeGrid(BasisGrid):
-    def __init__(self, a: float, b: float, boundary: bool=True, p: int=3, modified_basis: bool=False):
+    def __init__(self, a: Sequence[float], b: Sequence[float], boundary: bool=True, p: int=3, modified_basis: bool=False):
         self.boundary = boundary
         self.a = a
         self.b = b
@@ -366,7 +367,7 @@ class LagrangeGrid(BasisGrid):
 
 
 class LagrangeGrid1D(Grid1d):
-    def __init__(self, a: float, b: float, boundary: bool=True, p: int=3, modified_basis: bool=False):
+    def __init__(self, a: Sequence[float], b: Sequence[float], boundary: bool=True, p: int=3, modified_basis: bool=False):
         super().__init__(a=a, b=b, boundary=boundary)
         self.p = p  # max order of lagrange polynomials
         self.coords_gauss, self.weights_gauss = legendre.leggauss(int(self.p / 2) + 1)
@@ -482,7 +483,7 @@ class LagrangeGrid1D(Grid1d):
 
 
 class BSplineGrid(BasisGrid):
-    def __init__(self, a: float, b: float, boundary: bool=True, p: int=3, modified_basis: bool=False):
+    def __init__(self, a: Sequence[float], b: Sequence[float], boundary: bool=True, p: int=3, modified_basis: bool=False):
         self.boundary = boundary
         self.a = a
         self.b = b
@@ -499,7 +500,7 @@ class BSplineGrid(BasisGrid):
         return self.p > 1
 
 class BSplineGrid1D(Grid1d):
-    def __init__(self, a: float, b: float, boundary: bool=True, p: int=3, modified_basis: bool=False):
+    def __init__(self, a: Sequence[float], b: Sequence[float], boundary: bool=True, p: int=3, modified_basis: bool=False):
         super().__init__(a=a, b=b, boundary=boundary)
         self.p = p #spline order
         assert p % 2 == 1
@@ -1189,9 +1190,10 @@ class GlobalTrapezoidalGridWeighted(GlobalTrapezoidalGrid):
 class GlobalRombergGrid(GlobalGrid):
     def __init__(self, a, b, boundary=True, modified_basis=False,
                  do_cache=True,
+                 grid_version=GridVersion.DEFAULT,
+                 container_version=SliceContainerVersion.ROMBERG_DEFAULT,
                  slice_grouping=SliceGrouping.UNIT,
-                 slice_version=SliceVersion.ROMBERG_DEFAULT,
-                 container_version=SliceContainerVersion.ROMBERG_DEFAULT):
+                 slice_version=SliceVersion.ROMBERG_DEFAULT):
         self.boundary = boundary
         self.integrator = IntegratorArbitraryGridScalarProduct(self)
         self.a = a
@@ -1204,9 +1206,10 @@ class GlobalRombergGrid(GlobalGrid):
         assert not(modified_basis)
         assert boundary
 
+        self.grid_version = grid_version
+        self.container_version = container_version
         self.slice_grouping = slice_grouping
         self.slice_version = slice_version
-        self.container_version = container_version
 
         self.weight_cache = {}
 
@@ -1223,11 +1226,16 @@ class GlobalRombergGrid(GlobalGrid):
         if self.do_cache and key in self.weight_cache:
             return self.weight_cache[key]
 
-        romberg_grid = ExtrapolationGrid(slice_grouping=self.slice_grouping,
-                                         slice_version=self.slice_version,
-                                         container_version=self.container_version)
+        romberg_grid = ExtrapolationGrid(grid_version=self.grid_version,
+                                         container_version=self.container_version,
+                                         slice_grouping=self.slice_grouping,
+                                         slice_version=self.slice_version)
 
         romberg_grid.set_grid(grid_1D, grid_levels_1D)
+
+        # TODO Adapt function to one dimensional grid stripe (1D), because the function is multidimensional in the general case
+        # romberg_grid.set_function(self.function)
+
         weights = romberg_grid.get_weights()
 
         if self.do_cache:
@@ -1317,11 +1325,11 @@ class GlobalBasisGrid(GlobalGrid):
         evaluations = np.empty(self.dim, dtype=object)
         for d in range(self.dim):
             points_d = grid_points_for_dims[d]
-            evaluations1D = np.zeros((len(points_d), (len(self.splines[d]))))
-            for i, spline in enumerate(self.splines[d]):
+            evaluations1D = np.zeros((len(points_d), (len(self.basis[d]))))
+            for i, basis in enumerate(self.basis[d]):
                 for j, p in enumerate(points_d):
                     #print(p, spline(p))
-                    evaluations1D[j, i] = spline(p)
+                    evaluations1D[j, i] = basis(p)
             evaluations[d] = evaluations1D
         #print(evaluations)
 
@@ -1343,6 +1351,80 @@ class GlobalBasisGrid(GlobalGrid):
 
         #print(results)
         return results
+
+    def plot_basis_functions(self, support_points=None, interpolation_point=None, function=None, filename=None):
+        if self.basis is None:
+            print("No basis functions constructed")
+            return
+
+        # Iterate over all dimensions and plot each basis
+        for d in range(self.dim):
+            plt.figure()
+
+            if function is not None:
+                evaluation_points = np.linspace(self.a[d], self.b[d], len(support_points) * 100)
+                plt.plot(evaluation_points, [function([point]) for point in evaluation_points],
+                         linestyle=':', color="black")
+
+            # Plot basis functions
+            for i, basis in enumerate(self.basis[d]):
+                evaluation_points = np.linspace(self.a[d], self.b[d], len(basis.knots) * 100)
+                plt.plot(evaluation_points, [basis(point) for point in evaluation_points])
+
+            # Print interpolation grid
+            plt.plot(support_points, np.zeros(len(support_points)), 'bo', markersize=6, color="dimgray")
+            plt.title("Basis functions for the interpolation of point {}".format(interpolation_point))
+
+            plt.show()
+
+    def plot_basis_functions_with_evaluations(self, support_points, evaluation_point, function=None):
+        # Iterate over all dimensions and plot each basis
+        # plt.figure()
+
+        for d in range(self.dim):
+            # TODO plot dimension d
+            columns = 2
+            fig, axes = plt.subplots(figsize=(10, 15), nrows=math.ceil(len(support_points) / columns), ncols=columns)
+            fig.subplots_adjust(hspace=0.5)
+            fig.suptitle("Basis functions for the interpolation of the point {}".format(evaluation_point))
+
+            axes = axes.ravel()
+
+            a = support_points[0]
+            b = support_points[-1]
+
+            for i, basis in enumerate(self.basis[d]):
+                if function is not None:
+                    evaluation_points = np.linspace(a, b, len(support_points) * 100)
+                    axes[i].plot(evaluation_points, [function([point]) for point in evaluation_points],
+                             linestyle=':', color="black")
+
+                # Plot basis functions
+                for j, basis_f in enumerate(self.basis[d]):
+                    evaluation_points = np.linspace(self.a[d], self.b[d], len(basis.knots) * 100)
+                    axes[i].plot(evaluation_points, [basis_f(point) for point in evaluation_points])
+
+                # Print interpolation grid
+                axes[i].plot(support_points, np.zeros(len(support_points)), 'bo', markersize=4, color="black")
+
+                # Plot evaluation point
+                if evaluation_point is not None:
+                    evaluation_point_value = basis(evaluation_point)
+                    axes[i].plot(evaluation_point, evaluation_point_value, 'bo', markersize=4, color="red")
+                    axes[i].plot([evaluation_point, evaluation_point], [0, evaluation_point_value], ':',
+                                 color="red")
+
+                axes[i].set_title("Evaluation using basis function of point {}".format(support_points[i]))
+
+                if len(support_points) < 15:
+                    axes[i].set_xticks(support_points)
+                    axes[i].set_xticklabels(support_points, fontsize=9)
+
+            # Clear unused axes
+            for i in range(len(support_points), len(axes)):
+                fig.delaxes(axes[i])
+
+            fig.show()
 
 
 class GlobalBSplineGrid(GlobalBasisGrid):
@@ -1468,6 +1550,66 @@ class GlobalLagrangeGrid(GlobalBasisGrid):
         assert not(modified_basis) or not(boundary)
         self.surplus_values = {}
 
+    def compute_1D_quad_weights(self, grid_1D: Sequence[float], a: float, b: float, d: int,
+                                grid_levels_1D: Sequence[int]=None) -> Sequence[float]:
+        max_level = max(grid_levels_1D)
+        grid_1D = list(grid_1D)
+        grid_levels_1D = np.asarray(grid_levels_1D)
+        level_coordinate_array = [[] for l in range(max_level+1)]
+        for i, p in enumerate(grid_1D):
+            level_coordinate_array[grid_levels_1D[i]].append(p)
+
+        #print(level_coordinate_array)
+        self.start = a
+        self.end = b
+        # level = 0
+        weights = np.zeros(len(grid_1D))
+        starting_level = 0 if self.boundary else 1
+
+        for l in range(starting_level, max_level + 1):
+            for i in range(len(level_coordinate_array[l])):
+                x_basis = level_coordinate_array[l][i]
+                knots = grid_1D
+
+                if self.modified_basis:
+                    # spline = LagrangeBasisRestrictedModified(self.p, knots.index(x_basis), knots, a, b, l)
+                    RuntimeError("Modified Basis is not supported")
+
+                spline = LagrangeBasis(self.p, knots.index(x_basis), knots)
+                index = grid_1D.index(x_basis)
+                self.basis[d][index] = spline
+                weights[index] = self._get_spline_integral(spline, d)
+
+        if not self.boundary:
+            self.basis[d] = self.basis[d][1:-1]
+
+        for basis in self.basis[d]:
+            assert basis is not None
+
+        return weights
+
+    def _get_spline_integral(self, spline, d=None):
+        if self.coords_gauss is None:
+            self.coords_gauss, self.weights_gauss = legendre.leggauss(int(self.p/2) + 1)
+
+        return spline.get_integral(self.start, self.end, self.coords_gauss, self.weights_gauss)
+
+
+class GlobalHierarchicalLagrangeGrid(GlobalBasisGrid):
+    def __init__(self, a: Sequence[float], b: Sequence[float], boundary: bool=True, modified_basis: bool=False, p: int=3):
+        self.boundary = boundary
+        self.integrator = IntegratorHierarchicalBasisFunctions(self)
+        self.a = a
+        self.b = b
+        self.dim = len(a)
+        self.length = np.array(b) - np.array(a)
+        self.modified_basis = modified_basis
+        assert p >= 1
+        self.p = p
+        self.coords_gauss = None
+        assert not(modified_basis) or not(boundary)
+        self.surplus_values = {}
+
     def compute_1D_quad_weights(self, grid_1D: Sequence[float], a: float, b: float, d: int, grid_levels_1D: Sequence[int]=None) -> Sequence[float]:
         max_level = max(grid_levels_1D)
         grid_1D = list(grid_1D)
@@ -1559,7 +1701,7 @@ class GlobalLagrangeGrid(GlobalBasisGrid):
         assert False
 
 
-class GlobalLagrangeGridWeighted(GlobalLagrangeGrid):
+class GlobalLagrangeGridWeighted(GlobalHierarchicalLagrangeGrid):
     def __init__(self, a: Sequence[float], b: Sequence[float], uq_operation, boundary: bool=True, modified_basis: bool=False, p: int=3):
         super().__init__(a, b, boundary=boundary, modified_basis=modified_basis, p=p)
         self.distributions = uq_operation.get_distributions()

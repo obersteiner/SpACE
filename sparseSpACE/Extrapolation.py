@@ -517,6 +517,12 @@ class GridBinaryTree:
 # -----------------------------------------------------------------------------------------------------------------
 # ---  Extrapolation Grid
 
+class GridVersion(Enum):
+    DEFAULT = 1  # No interpolation are inserted
+    INTERPOLATE_SUB_GRIDS = 2  # Important missing grid points are inserted as interpolation points
+    INTERPOLATE_FULL_GRID = 3  # All missing points needed for a full grid are inserted as interpolation points
+
+
 class SliceGrouping(Enum):
     """
     This enum specifies the available options for slice grouping.
@@ -526,6 +532,23 @@ class SliceGrouping(Enum):
     GROUPED_OPTIMIZED = 3  # Group slices until container size is the max possible 2^k
 
 
+class SliceContainerVersion(Enum):
+    """
+    This enum specifies the available slice types.
+    """
+    # Only extrapolation
+    ROMBERG_DEFAULT = 1  # Default Romberg extrapolation in non-unit containers
+    SIMPSON_ROMBERG = 2  # Romberg extrapolation with simpson rule as base quadrature rule
+
+    # Interpolation before extrapolation
+    LAGRANGE_ROMBERG_OLD = 3  # Interpolated grid points are interpolated using Lagrange
+
+    # Interpolation before extrapolation using sparseSpACE grids
+    LAGRANGE_ROMBERG = 4  # Interpolated grid points are interpolated using Lagrange
+    HIERARCHICAL_LAGRANGE_ROMBERG = 5 # Interpolated grid points are interpolated using hierarchical Lagrange
+    BSPLINE_ROMBERG = 6 # Interpolated grid points are interpolated using BSplines
+
+
 class SliceVersion(Enum):
     """
     This enum specifies the available slice types.
@@ -533,16 +556,6 @@ class SliceVersion(Enum):
     ROMBERG_DEFAULT = 1  # Sliced Romberg with default Romberg extrapolation
     TRAPEZOID = 2  # Default trapezoidal rule without extrapolation
     ROMBERG_DEFAULT_CONST_SUBTRACTION = 3  # Sliced Romberg with default Romberg extrapolation and constant subtraction
-
-
-class SliceContainerVersion(Enum):
-    """
-    This enum specifies the available slice types.
-    """
-    ROMBERG_DEFAULT = 1  # Default Romberg extrapolation in non-unit containers
-    LAGRANGE_ROMBERG = 2  # Important missing grid points are interpolated with Lagrange
-    LAGRANGE_FULL_GRID_ROMBERG = 3  # All missing points needed for a full grid are interpolated
-    SIMPSON_ROMBERG = 4  # Romberg extrapolation with simpson rule as base quadrature rule
 
 
 class ExtrapolationGrid:
@@ -559,9 +572,10 @@ class ExtrapolationGrid:
     """
 
     def __init__(self,
+                 grid_version: GridVersion = GridVersion.DEFAULT,
+                 container_version: SliceContainerVersion = SliceContainerVersion.ROMBERG_DEFAULT,
                  slice_grouping: SliceGrouping = SliceGrouping.UNIT,
                  slice_version: SliceVersion = SliceVersion.ROMBERG_DEFAULT,
-                 container_version: SliceContainerVersion = SliceContainerVersion.ROMBERG_DEFAULT,
                  force_balanced_refinement_tree: bool = False,
                  print_debug: bool = False):
         self.print_debug = print_debug
@@ -576,24 +590,29 @@ class ExtrapolationGrid:
         self.integral_approximation = None
 
         # Different grid versions
+        self.grid_version = grid_version
+        self.container_version = container_version
         self.slice_grouping = slice_grouping
         self.slice_version = slice_version
-        self.container_version = container_version
         self.force_balanced_refinement_tree = force_balanced_refinement_tree
 
         # Factories
         self.slice_factory = ExtrapolationGridSliceFactory(self.slice_version)
         self.container_factory = ExtrapolationGridSliceContainerFactory(self.container_version)
 
-        # Interpolation
-        if self.container_version == SliceContainerVersion.LAGRANGE_FULL_GRID_ROMBERG:
+        # Should interpolation grid points be inserted?
+        if self.grid_version == GridVersion.INTERPOLATE_FULL_GRID:
             self.max_interpolation_step_width_delta = np.infty
-        else:
+        elif self.grid_version == GridVersion.INTERPOLATE_SUB_GRIDS:
             self.max_interpolation_step_width_delta = 2 ** 1
+        else:
+            self.max_interpolation_step_width_delta = 0
+
+        # TODO Assert right combinations of grid_version and container_version
 
     def interpolation_is_enabled(self) -> bool:
-        return self.container_version == SliceContainerVersion.LAGRANGE_ROMBERG or \
-               self.container_version == SliceContainerVersion.LAGRANGE_FULL_GRID_ROMBERG
+        return self.grid_version == GridVersion.INTERPOLATE_SUB_GRIDS or \
+               self.grid_version == GridVersion.INTERPOLATE_FULL_GRID
 
     # Integration
     def integrate(self, function: Function = None) -> float:
@@ -2254,7 +2273,7 @@ class InterpolationGridSliceContainer(ExtrapolationGridSliceContainer):
 
             if adaptive and len(support_points) > 2:
                 for support_point in support_points:
-                    weight = self.get_interpolation_weights(support_points, support_point, interp_point)
+                    weight = self.get_interpolation_weight(support_points, support_point, interp_point)
 
                     if weight < 0:
                         negative_sum += weight
@@ -2275,6 +2294,54 @@ class InterpolationGridSliceContainer(ExtrapolationGridSliceContainer):
             assert len(support_points) >= 2, "There are to few support points, for an interpolation."
 
         return support_points
+
+    @staticmethod
+    def get_levels_for_support_point_grid(support_points: Sequence[float]):
+        assert len(support_points) >= 2
+
+        inner_levels = None
+
+        if len(support_points) == 2:
+            inner_levels = []
+
+        else:
+            inner_levels = InterpolationGridSliceContainer.__get_levels_for_support_points_rec(
+                support_points,
+                start_index=1,
+                stop_index=(len(support_points)-1)-1,  # -1 for last index and -1 for 2nd last index
+                level=1
+            )
+
+        assert len(inner_levels) + 2 == len(support_points)
+
+        return [0] + inner_levels + [0]
+
+    @staticmethod
+    def __get_levels_for_support_points_rec(support_points: Sequence[float],
+                                                          start_index: float, stop_index: float,
+                                                          level: int = 1) -> Sequence[int]:
+        middle_index = int((start_index + stop_index) / 2)
+        # middle = support_points[middle_index]
+
+        if start_index > stop_index:
+            return []
+        elif start_index == stop_index:
+            return [level]
+
+        left_levels = InterpolationGridSliceContainer.__get_levels_for_support_points_rec(
+            support_points,
+            start_index,
+            middle_index - 1,
+            level + 1
+        )
+        right_levels = InterpolationGridSliceContainer.__get_levels_for_support_points_rec(
+            support_points,
+            middle_index + 1,
+            stop_index,
+            level + 1
+        )
+
+        return left_levels + [level] + right_levels
 
     def insert_interpolating_slices(self) -> None:
         """
@@ -2364,56 +2431,6 @@ class InterpolationGridSliceContainer(ExtrapolationGridSliceContainer):
 
         return interpolation_points
 
-    @abstractmethod
-    def get_final_weights(self) -> Dict[float, Sequence[float]]:
-        pass
-
-    def get_interpolation_weight(self, support_points: Sequence[float], basis_point: float, evaluation_point: float)\
-            -> float:
-        pass
-
-
-class LagrangeRombergGridSliceContainer(InterpolationGridSliceContainer):
-    """
-        This class interpolates as many missing points as possible inside the container and executes a default
-        Romberg method on this interpolated partial full grid.
-
-        For the interpolation we use the closest points to the left and right of this container.
-    """
-
-    def __init__(self, function: Function = None):
-        """
-            Constructor of this class.
-
-            :param function: for error computation.
-        """
-        super(LagrangeRombergGridSliceContainer, self).__init__(function)
-        self.max_interpolation_support_points = 7
-
-    def get_interpolation_weights(self, support_points, basis_point, evaluation_point) -> float:
-        return self.get_langrange_basis(support_points, basis_point, evaluation_point)
-
-    @staticmethod
-    def get_langrange_basis(support_points: Sequence[float], basis_point: float, evaluation_point: float) -> float:
-        """
-        This method computes a lambda expression for the lagrange basis function at basis_point.
-        Specifically: Let support_points = [x_0, x_1, ... , x_n]
-        L = product( (evaluation_point - x_k) / (basis_point - x_k) )
-
-        :param support_points: an array of support points for the interpolation
-        :param basis_point: determines basis_point of this lagrange basis function
-        :param evaluation_point: determines at which point the basis is evaluated
-        :return: the evaluated basis function L
-        """
-
-        evaluated_basis = 1
-
-        for point in support_points:
-            if point != basis_point:
-                evaluated_basis *= (evaluation_point - point) / (basis_point - point)
-
-        return evaluated_basis
-
     def get_final_weights(self) -> Dict[float, Sequence[float]]:
         assert len(self.slices) > 0
 
@@ -2472,10 +2489,257 @@ class LagrangeRombergGridSliceContainer(InterpolationGridSliceContainer):
                 weight = factory.get_inner_point_weight(normalized_grid_levels[i],
                                                         normalized_max_level)
 
+            print()
             for support_point in support_points:
-                interpolated_extrapolated_weight = weight * self.get_langrange_basis(support_points, support_point,
-                                                                                     interp_point)
+                interpolation_weight = self.get_interpolation_weight(support_points, support_point, interp_point)
+                # print(interpolation_weight)
+                interpolated_extrapolated_weight = weight * interpolation_weight
                 weight_dictionary[support_point].append(interpolated_extrapolated_weight)
+
+            # TODO add a flag for plotting this
+            # Plot basis functions
+            # self.plot_interpolation_basis_functions(support_points, interp_point)
+            # self.plot_interpolation_basis_functions_with_evaluations(support_points, interp_point)
+
+    def get_interpolation_weight(self, support_points: Sequence[float],
+                                 basis_point: float, evaluation_point: float) -> float:
+        pass
+
+    def plot_interpolation_basis_functions(self, support_points: Sequence[float], interpolation_point: float):
+        pass
+
+    def plot_interpolation_basis_functions_with_evaluations(self, support_points: Sequence[float],
+                                                            evaluation_point: float):
+        pass
+
+
+# This class was replaced with LagrangeRombergGridSliceContainer(GlobalBasisGridRombergGridSliceContainerAdapter)
+class LagrangeRombergGridSliceContainerOld(InterpolationGridSliceContainer):
+    """
+        This class interpolates as many missing points as possible inside the container and executes a default
+        Romberg method on this interpolated partial full grid.
+
+        For the interpolation we use the closest points to the left and right of this container.
+    """
+
+    def __init__(self, function: Function = None):
+        """
+            Constructor of this class.
+
+            :param function: for error computation.
+        """
+        super(LagrangeRombergGridSliceContainerOld, self).__init__(function)
+        self.max_interpolation_support_points = 7
+
+    def get_interpolation_weight(self, support_points, basis_point, evaluation_point) -> float:
+        return self.get_langrange_basis(support_points, basis_point, evaluation_point)
+
+    @staticmethod
+    def get_langrange_basis(support_points: Sequence[float], basis_point: float, evaluation_point: float) -> float:
+        """
+        This method computes a lambda expression for the lagrange basis function at basis_point.
+        Specifically: Let support_points = [x_0, x_1, ... , x_n]
+        L = product( (evaluation_point - x_k) / (basis_point - x_k) )
+
+        :param support_points: an array of support points for the interpolation
+        :param basis_point: determines basis_point of this lagrange basis function
+        :param evaluation_point: determines at which point the basis is evaluated
+        :return: the evaluated basis function L
+        """
+
+        evaluated_basis = 1
+
+        for point in support_points:
+            if point != basis_point:
+                evaluated_basis *= (evaluation_point - point) / (basis_point - point)
+
+        return evaluated_basis
+
+    def plot_interpolation_basis_functions_with_evaluations(self, support_points, evaluation_point):
+        # Iterate over all dimensions and plot each basis
+        # plt.figure()
+
+        columns = 2
+        fig, axes = plt.subplots(figsize=(10, 15), nrows=math.ceil(len(support_points) / columns), ncols=columns)
+        fig.subplots_adjust(hspace=0.5)
+        fig.suptitle("Basis functions for the interpolation of the point {}".format(evaluation_point))
+
+        axes = axes.ravel()
+
+        a = support_points[0]
+        b = support_points[-1]
+
+        for i, basis_point in enumerate(support_points):
+            if self.function is not None:
+                evaluation_points = np.linspace(a, b, len(support_points) * 100)
+                axes[i].plot(evaluation_points, [self.function([point]) for point in evaluation_points],
+                         linestyle=':', color="black")
+
+            # Plot basis functions
+            for support_point in support_points:
+                evaluation_points = np.linspace(a, b, len(support_points) * 100)
+                axes[i].plot(evaluation_points, [self.get_langrange_basis(support_points, support_point, point)
+                                             for point in evaluation_points])
+
+            # Print interpolation grid
+            axes[i].plot(support_points, np.zeros(len(support_points)), 'bo', markersize=4, color="black")
+
+            # Plot evaluation point
+            if evaluation_point is not None:
+                evaluation_point_value = self.get_langrange_basis(support_points, basis_point, evaluation_point)
+                axes[i].plot(evaluation_point, evaluation_point_value, 'bo', markersize=4, color="red")
+                axes[i].plot([evaluation_point, evaluation_point], [0, evaluation_point_value], ':',
+                             color="red")
+
+            axes[i].set_title("Evaluation using basis function of point {}".format(basis_point))
+
+            if len(support_points) < 15:
+                axes[i].set_xticks(support_points)
+                axes[i].set_xticklabels(support_points, fontsize=9)
+
+        # Clear unused axes
+        for i in range(len(support_points), len(axes)):
+            fig.delaxes(axes[i])
+
+        fig.show()
+
+
+class GlobalBasisGridRombergGridSliceContainerAdapter(InterpolationGridSliceContainer):
+
+    """
+        This class provides an interfaces for interpolating as many missing points as possible inside the container.
+        It uses the interpolation functionality from the GlobalBasisGrid classes.
+
+        It executes a default Romberg method on this interpolated partial full grid.
+        For the interpolation we use the closest points to the left and right of this container.
+    """
+
+    def __init__(self, function: Function = None):
+        """
+            Constructor of this class.
+
+            :param function: for error computation.
+        """
+        super(GlobalBasisGridRombergGridSliceContainerAdapter, self).__init__(function)
+        self.max_interpolation_support_points = 7
+        self.interpolation_grid = None
+
+    @abstractmethod
+    def construct_interpolation_grid(self, support_points):
+        """
+
+        Parameters
+        ----------
+        support_points
+
+        Returns GlobalBasisGrid
+        -------
+
+        """
+        pass
+
+    def get_interpolation_weight(self, support_points, basis_point, evaluation_point) -> float:
+        # Interpolation grid is computed beforehand
+        interpolation_grid = self.construct_interpolation_grid(support_points)
+        self.interpolation_grid = interpolation_grid
+
+        support_point_grid_levels = InterpolationGridSliceContainer.get_levels_for_support_point_grid(support_points)
+        interpolation_grid.set_grid([support_points], [support_point_grid_levels])
+
+        # Compute weight
+        assert len(interpolation_grid.basis) == 1
+        basis = interpolation_grid.basis[0]
+        assert len(basis) == len(support_points)
+
+        i = support_points.index(basis_point)  # Element must be found
+        weight = basis[i](evaluation_point)
+        # TODO which basis function should be chosen?
+
+        return weight
+
+    def plot_interpolation_basis_functions(self, support_points, interpolation_point):
+        self.interpolation_grid.plot_basis_functions(support_points, interpolation_point, self.function)
+
+    def plot_interpolation_basis_functions_with_evaluations(self, support_points, evaluation_point):
+        self.interpolation_grid.plot_basis_functions_with_evaluations(support_points, evaluation_point, self.function)
+
+
+class BSplineRombergGridSliceContainer(GlobalBasisGridRombergGridSliceContainerAdapter):
+
+    """
+        This class interpolates (BSplines) as many missing points as possible inside the container
+        It  executes a default Romberg method on this interpolated partial full grid.
+
+        For the interpolation we use the closest points to the left and right of this container.
+    """
+
+    def __init__(self, function: Function = None):
+        """
+            Constructor of this class.
+
+            :param function: for error computation.
+        """
+        super(BSplineRombergGridSliceContainer, self).__init__(function)
+        self.max_interpolation_support_points = 7
+
+    def construct_interpolation_grid(self, support_points):
+        # Prevent circular dependencies
+        from sparseSpACE.Grid import GlobalBSplineGrid
+
+        # Interpolation grid is computed beforehand
+        return GlobalBSplineGrid([support_points[0]], [support_points[-1]], boundary=True)
+
+
+class LagrangeRombergGridSliceContainer(GlobalBasisGridRombergGridSliceContainerAdapter):
+
+    """
+        This class interpolates (Hierarchical Lagrange) as many missing points as possible inside the container
+        It  executes a default Romberg method on this interpolated partial full grid.
+
+        For the interpolation we use the closest points to the left and right of this container.
+    """
+
+    def __init__(self, function: Function = None):
+        """
+            Constructor of this class.
+
+            :param function: for error computation.
+        """
+        super(LagrangeRombergGridSliceContainer, self).__init__(function)
+        self.max_interpolation_support_points = 7
+
+    def construct_interpolation_grid(self, support_points):
+        # Prevent circular dependencies
+        from sparseSpACE.Grid import GlobalLagrangeGrid
+
+        # Interpolation grid is computed beforehand
+        return GlobalLagrangeGrid([support_points[0]], [support_points[-1]], boundary=True)
+
+
+class HierarchicalLagrangeRombergGridSliceContainer(GlobalBasisGridRombergGridSliceContainerAdapter):
+
+    """
+        This class interpolates (Hierarchical Lagrange) as many missing points as possible inside the container
+        It  executes a default Romberg method on this interpolated partial full grid.
+
+        For the interpolation we use the closest points to the left and right of this container.
+    """
+
+    def __init__(self, function: Function = None):
+        """
+            Constructor of this class.
+
+            :param function: for error computation.
+        """
+        super(HierarchicalLagrangeRombergGridSliceContainer, self).__init__(function)
+        self.max_interpolation_support_points = 7
+
+    def construct_interpolation_grid(self, support_points):
+        # Prevent circular dependencies
+        from sparseSpACE.Grid import GlobalHierarchicalLagrangeGrid
+
+        # Interpolation grid is computed beforehand
+        return GlobalHierarchicalLagrangeGrid([support_points[0]], [support_points[-1]], boundary=True)
 
 
 class TrapezoidalGridSlice(ExtrapolationGridSlice):
@@ -2592,11 +2856,16 @@ class ExtrapolationGridSliceContainerFactory:
     def get_grid_slice_container(self, function: Function = None) -> ExtrapolationGridSliceContainer:
         if self.slice_container_version == SliceContainerVersion.ROMBERG_DEFAULT:
             return RombergGridSliceContainer(function)
-        elif self.slice_container_version == SliceContainerVersion.LAGRANGE_ROMBERG or \
-            self.slice_container_version == SliceContainerVersion.LAGRANGE_FULL_GRID_ROMBERG:
+        elif self.slice_container_version == SliceContainerVersion.LAGRANGE_ROMBERG_OLD:
+            return LagrangeRombergGridSliceContainerOld(function)
+        elif self.slice_container_version == SliceContainerVersion.LAGRANGE_ROMBERG:
             return LagrangeRombergGridSliceContainer(function)
         elif self.slice_container_version == SliceContainerVersion.SIMPSON_ROMBERG:
             return SimpsonRombergGridSliceContainer(function)
+        elif self.slice_container_version == SliceContainerVersion.BSPLINE_ROMBERG:
+            return BSplineRombergGridSliceContainer(function)
+        elif self.slice_container_version == SliceContainerVersion.HIERARCHICAL_LAGRANGE_ROMBERG:
+            return HierarchicalLagrangeRombergGridSliceContainer(function)
         else:
             raise RuntimeError("Wrong ContainerVersion provided.")
 

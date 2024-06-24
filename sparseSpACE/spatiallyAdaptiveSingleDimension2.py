@@ -1374,7 +1374,7 @@ class SpatiallyAdaptiveSingleDimensions2(SpatiallyAdaptivBase):
     # on this slice.
     def calculate_surplusses(self, grid_points: Sequence[Sequence[float]], children_indices: Sequence[Sequence[int]], component_grid: ComponentGridInfo):
         tol = 10**-84
-        if isinstance(self.grid_surplusses, GlobalBSplineGrid) or isinstance(self.grid_surplusses, GlobalLagrangeGrid):
+        if isinstance(self.grid_surplusses, GlobalBSplineGrid) or isinstance(self.grid_surplusses, GlobalHierarchicalLagrangeGrid):
             # grid_values = np.empty((self.f.output_length(), np.prod(self.grid.numPoints)))
             # points = self.grid.getPoints()
             # for i, point in enumerate(points):
@@ -1383,7 +1383,7 @@ class SpatiallyAdaptiveSingleDimensions2(SpatiallyAdaptivBase):
         for d in range(0, self.dim):
             k=0
             refinement_dim = self.refinement.get_refinement_container_for_dim(d)
-            if isinstance(self.grid_surplusses, GlobalBSplineGrid) or isinstance(self.grid_surplusses, GlobalLagrangeGrid):
+            if isinstance(self.grid_surplusses, GlobalBSplineGrid) or isinstance(self.grid_surplusses, GlobalHierarchicalLagrangeGrid):
                 hierarchization_operator = HierarchizationLSG(self.grid)
                 surplusses_1d = hierarchization_operator.hierarchize_poles_for_dim(np.array(grid_values.T), self.grid.numPoints, d)
                 surplus_pole = np.zeros((self.operation.point_output_length(), self.grid.numPoints[d]))
@@ -1393,14 +1393,14 @@ class SpatiallyAdaptiveSingleDimensions2(SpatiallyAdaptivBase):
                     while i < np.prod(self.grid.numPoints):
                         surplus_pole[:,j] += np.sum(abs(surplusses_1d[:,i:i+stride])) #* weights[i:i+stride]))
                         i += stride * self.grid.numPoints[d]
-            if not (isinstance(self.grid_surplusses, GlobalBSplineGrid) or isinstance(self.grid_surplusses, GlobalLagrangeGrid)) and len(children_indices[d]) > 0:
+            if not (isinstance(self.grid_surplusses, GlobalBSplineGrid) or isinstance(self.grid_surplusses, GlobalHierarchicalLagrangeGrid)) and len(children_indices[d]) > 0:
                 #print(children_indices)
                 volumes, evaluations = self.sum_up_volumes_for_point_completely_vectorized(child_infos=children_indices[d], grid_points=grid_points, d=d, component_grid=component_grid)
             for i, child_info in enumerate(children_indices[d]):
                 left_parent = child_info.left_parent
                 right_parent = child_info.right_parent
                 child = child_info.child
-                if isinstance(self.grid_surplusses, GlobalBSplineGrid) or isinstance(self.grid_surplusses, GlobalLagrangeGrid):
+                if isinstance(self.grid_surplusses, GlobalBSplineGrid) or isinstance(self.grid_surplusses, GlobalHierarchicalLagrangeGrid):
                     index_child = grid_points[d].index(child) - int(not(self.grid.boundary))
                     volume = surplus_pole[:, index_child] / np.prod(self.grid.numPoints) * self.grid.numPoints[d] * self.grid.weights[d][index_child]
                     evaluations = np.prod(self.grid.numPoints) / self.grid.numPoints[d]

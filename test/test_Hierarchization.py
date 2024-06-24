@@ -14,7 +14,7 @@ class TestHierarchization(unittest.TestCase):
         a = -3
         b = 6
         for d in range(2, 5):
-            grid = GlobalLagrangeGrid(a*np.ones(d), b*np.ones(d), boundary= True, modified_basis = False, p = 1)
+            grid = GlobalHierarchicalLagrangeGrid(a*np.ones(d), b*np.ones(d), boundary= True, modified_basis = False, p = 1)
             for l in range(7 - d):
                 f = FunctionLinear([10*(i+1) for i in range(d)])
                 grid_points = [np.linspace(a,b,2**(l+i)+ 1) for i in range(d)]

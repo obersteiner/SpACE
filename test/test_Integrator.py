@@ -36,7 +36,7 @@ class TestIntegrator(unittest.TestCase):
         b = 6
         for d in range(1, 5):
             for p in range(1,7):
-                grid = GlobalLagrangeGrid(a*np.ones(d), b*np.ones(d), boundary= True, modified_basis = False, p=p)
+                grid = GlobalHierarchicalLagrangeGrid(a*np.ones(d), b*np.ones(d), boundary= True, modified_basis = False, p=p)
                 for l in range(p - 1, 8 - d):
                     f = FunctionPolynomial([10*(i+1) for i in range(d)], degree=p)
                     grid_points = [np.linspace(a,b,2**l+ 1) for _ in range(d)]
