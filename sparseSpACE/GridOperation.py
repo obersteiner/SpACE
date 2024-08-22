@@ -191,8 +191,8 @@ class GridOperation(object):
                 if mesh_points_grid is None:
                     mesh_points_grid = self.grid.coordinate_array_with_boundary
                 if self.grid.get_num_points() < threshold or self.grid.modified_basis:
-                    points, lower, upper = self.get_hat_domain_for_every_grid_point_vectorized(mesh_points_grid)
-                    hat_evaluations = self.hat_function_non_symmetric_completely_vectorized(points, lower, upper,
+                    points, lower, upper, lower_lower, upper_upper = self.get_hat_domain_for_every_grid_point_vectorized(mesh_points_grid)
+                    hat_evaluations = self.hat_function_non_symmetric_completely_vectorized(points, lower, upper, lower_lower, upper_upper,
                                                                                             evaluation_points, grid_values)
                     interpolated_values = np.sum(hat_evaluations * np.asarray(grid_values).flatten(), axis=1)
                     interpolated_values = interpolated_values.reshape(
@@ -221,6 +221,8 @@ class GridOperation(object):
     def hat_function_non_symmetric_completely_vectorized(self, grid_point_positions: Sequence[Sequence[float]],
                                                          lower: Sequence[Sequence[float]],
                                                          upper: Sequence[Sequence[float]],
+                                                         lower_lower: Sequence[Sequence[float]],
+                                                         upper_upper: Sequence[Sequence[float]],
                                                          evaluation_points: Sequence[Sequence[float]],
                                                          grid_values: Sequence[float]) \
             -> Sequence[float]:
@@ -283,37 +285,47 @@ class GridOperation(object):
         else:
             # not yet implemented
             # assert False
+            # print("grid points", grid_point_positions)
+            # print("UU and LL", upper_upper, lower_lower)
             filter_upper = upper != None
+            filter_upper_upper_boundary = (upper_upper != None)
+            # print(filter_upper_upper_boundary)
             filter_lower = lower != None
+            filter_lower_lower_boundary = (lower_lower != None)
+            # print(filter_lower_lower_boundary)
 
             value_1_temp = (evaluation_points[:, filter_upper] - grid_point_positions[filter_upper])
             value1_temp = 1.0 - value_1_temp / (upper[filter_upper] - grid_point_positions[filter_upper])
             value1_temp[np.logical_and(value1_temp > 1, filter_lower[filter_upper])] = 0
-            value1_temp[value1_temp < 0] = 0
+            # print("value1_tmp", value1_temp)
+            value1_temp[np.logical_and((value1_temp < 0),filter_upper_upper_boundary[filter_upper])] = 0
+            # print("value1_tmp2", value1_temp)
+
             value1 = np.zeros(np.shape(evaluation_points))
             value1[:, filter_upper] = value1_temp  # if we are out of support we are <0 if we are on wrong side > 1
 
             # value1_temp = 1.0 - (evaluation_points - grid_point_positions) / (upper - grid_point_positions)
             # value1_maximum_filter = np.maximum.reduce([value1_temp, np.zeros(np.shape(evaluation_points))])
             # value1_2 =  value1_maximum_filter * np.ceil(evaluation_points - grid_point_positions + 10**-30)
-            # print(value1, value1_2)
+            # print("value1",value1)
             # assert np.all(value1 == value1_2)
 
             value_2_temp = (grid_point_positions[filter_lower] - evaluation_points[:, filter_lower])
             value2_temp = 1.0 - value_2_temp / (grid_point_positions[filter_lower] - lower[filter_lower])
             # if we are out of support we are <0 if we are on wrong side > 1
             value2_temp[np.logical_and(value2_temp >= 1, filter_upper[filter_lower])] = 0
-            value2_temp[value2_temp < 0] = 0
+            #print(value2_temp)
+            value2_temp[np.logical_and(value2_temp < 0,filter_lower_lower_boundary[filter_lower])] = 0
             value2 = np.zeros(np.shape(evaluation_points))
             value2[:, filter_lower] = value2_temp
 
             value3 = np.zeros(np.shape(evaluation_points))
             value3[:, np.logical_and(upper == None, lower == None)] = 1
-            #print("values 1- 3", value1, value2, value3)
+            # print("values 1- 3", value1, value2, value3)
             # value2_2 = np.maximum.reduce([1.0 - (grid_point_positions - evaluation_points) / (grid_point_positions - lower), np.zeros(np.shape(evaluation_points))]) * np.ceil(grid_point_positions - evaluation_points)
             result = np.prod(value1 + value2 + value3, axis=2)
-            #print("Result", result)
-            # print(value2, value2_2)
+            # print("Result", result)
+            # print(value2)
             # assert np.all(value2_2 == value2)
             return result
 
@@ -337,8 +349,15 @@ class GridOperation(object):
         lower = get_cross_product_numpy_array(
             [np.roll(coords[d], 1)[1:-1] for d in range(self.dim)])
         points = get_cross_product_numpy_array([coords[d][1:-1] for d in range(self.dim)])
+        if self.grid.modified_basis:
+            coords = [np.array([None] + list(coords[d]) + [None]) for d in range(self.dim)]
+            upper_upper = get_cross_product_numpy_array(
+                [np.roll(coords[d], -2)[2:-2] for d in range(self.dim)])
+            lower_lower = get_cross_product_numpy_array(
+                [np.roll(coords[d], 2)[2:-2] for d in range(self.dim)])
+            return points, lower, upper, lower_lower, upper_upper
         #print(gridPointCoordsAsStripes, points, lower, upper)
-        return points, lower, upper
+        return points, lower, upper, None, None
 
     def hat_function_non_symmetric_vectorized(self, points: Sequence[float],
                                               domain: Sequence[float],
